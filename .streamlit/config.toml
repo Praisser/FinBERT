@@ -1,0 +1,35 @@
+[client]
+toolbarMode = "viewer"   # hides the deploy and developer options; the menu keeps the light/dark switch
+
+# Two colors per mode, ink and paper. Every gray in the app is a mix of the two
+# (see dashboard/style.css). Charts draw in ink by default.
+[theme]
+# System fonts (Segoe UI on Windows, San Francisco on macOS): no download, so charts measure
+# their labels correctly and the dashboard works offline.
+font = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+baseRadius = "0.5rem"
+headingFontWeights = [600, 600, 600]
+
+[theme.light]
+primaryColor = "#0a0a0a"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f4f5"
+textColor = "#0a0a0a"
+borderColor = "#e4e4e7"
+dataframeHeaderBackgroundColor = "#fafafa"
+chartCategoricalColors = ["#0a0a0a", "#0a0a0a", "#0a0a0a", "#0a0a0a", "#0a0a0a", "#0a0a0a", "#0a0a0a", "#0a0a0a"]
+
+[theme.light.sidebar]
+backgroundColor = "#fafafa"
+
+[theme.dark]
+primaryColor = "#fafafa"
+backgroundColor = "#0a0a0a"
+secondaryBackgroundColor = "#18181b"
+textColor = "#fafafa"
+borderColor = "#27272a"
+dataframeHeaderBackgroundColor = "#111113"
+chartCategoricalColors = ["#fafafa", "#fafafa", "#fafafa", "#fafafa", "#fafafa", "#fafafa", "#fafafa", "#fafafa"]
+
+[theme.dark.sidebar]
+backgroundColor = "#0f0f10"

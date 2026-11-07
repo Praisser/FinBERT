@@ -28,11 +28,11 @@ def fetch_prices(ticker: str, start: date, end: date) -> pd.DataFrame:
 
 
 def fetch_intraday(ticker: str) -> pd.DataFrame:
-    """1-minute prices for the last few sessions, in the exchange's time zone."""
+    """1-minute OHLCV bars for the last few sessions, in the exchange's time zone."""
     bars = yf.Ticker(ticker).history(period="5d", interval="1m")
     if bars.empty:
         raise ValueError(f"No intraday data found for ticker {ticker!r}")
-    return bars[["Close", "Volume"]]
+    return bars[["Open", "High", "Low", "Close", "Volume"]]
 
 
 def default_news_query(ticker: str) -> str:

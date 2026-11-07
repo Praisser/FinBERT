@@ -35,6 +35,20 @@ SENTIMENT_FEATURES = [
 ]
 TARGET = "target"     # next day's log return
 
+# Feature names as shown in charts
+FEATURE_LABELS = {
+    "return": "Daily return",
+    "intraday": "Intraday return",
+    "hl_range": "High-low range",
+    "volume_ratio": "Volume vs 20-day average",
+    "rsi": "RSI (14 days)",
+    "macd": "MACD",
+    "macd_signal": "MACD signal line",
+    "close_vs_sma": "Close vs SMA (20 days)",
+    "close_vs_ema": "Close vs EMA (20 days)",
+    "sentiment": "News sentiment",
+}
+
 # Training
 WINDOW = 30           # trading days of history fed to the models
 VAL_FRACTION = 0.15

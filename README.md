@@ -29,8 +29,9 @@ The FinBERT model (~440 MB) downloads automatically the first time it runs.
 streamlit run app.py
 ```
 
-Tabs: Live market (refreshes every minute), Prediction, News sentiment, Model comparison (with
-tuning results), Explanation (SHAP).
+Tabs: Prediction, Live market (refreshes every minute), News sentiment, Model comparison (with
+tuning results), Explainability (SHAP), About. The dashboard follows the system's light or dark mode;
+switch it from the menu at the top right.
 
 **Notebook.** [`stock_prediction.ipynb`](stock_prediction.ipynb) runs the method one stage at a time
 with Matplotlib charts. Open it with `jupyter notebook`, or in
@@ -59,7 +60,7 @@ only fetch news published since the last run, so they take under a minute.
 | 6. Training and tuning | `models.py`, `train.py` | LSTM and Transformer encoder (PyTorch). A grid search over model size and depth keeps the setting with the lowest validation loss |
 | 7. Evaluation | `evaluate.py` | MAE, RMSE, R² on the test period, for both models **with and without** sentiment |
 | 8. Explainability | `explain.py` | SHAP (GradientExplainer): contribution of every feature to every prediction |
-| Dashboard | `app.py` | Live market, prediction chart and next-day forecast, news sentiment, model comparison, SHAP |
+| Dashboard | `app.py`, `dashboard/` | Prediction and next-day forecast, live market, news sentiment, model comparison, SHAP, and an About page. The look is defined in `dashboard/style.css` and `.streamlit/config.toml` |
 | Report figures | `plots.py` | Matplotlib charts saved as PNG files with every run and shown in the notebook |
 
 `pipeline.py` runs the stages in order. All settings (window length, split sizes, tuning grid,
@@ -102,7 +103,7 @@ the next model run includes them.
 
 ## Limitations
 
-- Google News returns only about 1–3 headlines per trading day for older periods, and many more for
+- Google News returns only about 1 to 3 headlines per trading day for older periods, and many more for
   the last few weeks. Days without news get a neutral sentiment of 0. Headline counts are not used as
   a feature, because they would reflect how old the data is rather than market activity.
 - The news-to-session timing uses the US market close (4 pm Eastern). For stocks on other exchanges

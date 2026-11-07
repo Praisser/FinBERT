@@ -1,4 +1,4 @@
-"""Dashboard: run the pipeline for a stock and explore live market data, its predictions,
+"""Dashboard: run the pipeline for a stock and present its predictions, live market data,
 news sentiment, model comparison and SHAP explanations.
 
     streamlit run app.py
@@ -6,21 +6,22 @@ news sentiment, model comparison and SHAP explanations.
 
 import json
 import logging
+from html import escape
 
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
 
+from dashboard import about, charts, ui
+from dashboard.ui import day, pct, short_day
 from stockpred import db, ingest
 from stockpred.config import ARTIFACTS_DIR, HISTORY_YEARS, LIVE_REFRESH_SECONDS
 from stockpred.models import MODELS
 from stockpred.pipeline import run
 
-UP, DOWN = "#2e7d32", "#c62828"
+st.set_page_config(page_title="Stock Price Prediction", page_icon=":material/show_chart:", layout="wide")
+ui.inject_css()
 
-st.set_page_config(page_title="Stock Sentiment Predictor", layout="wide")
+PARAM_NAMES = {"hidden": "hidden size", "d_model": "model size", "layers": "layers"}
 
 
 class StatusHandler(logging.Handler):
@@ -37,7 +38,7 @@ class StatusHandler(logging.Handler):
 def run_pipeline(ticker: str, years: int) -> bool:
     logger = logging.getLogger("stockpred")
     logger.setLevel(logging.INFO)
-    with st.status(f"Analysing {ticker}…", expanded=True) as status:
+    with st.status(f"Analysing {ticker}. This takes a few minutes.", expanded=True) as status:
         handler = StatusHandler(status)
         logger.addHandler(handler)
         try:
@@ -63,26 +64,28 @@ def load_results(ticker: str, version: float) -> dict:
     }
 
 
-def signed_bar(values: pd.Series, x_title: str) -> go.Figure:
-    values = values.sort_values()
-    fig = go.Figure(go.Bar(x=values, y=values.index, orientation="h", marker_color=[UP if v >= 0 else DOWN for v in values]))
-    fig.update_layout(xaxis_title=x_title, height=60 + 32 * len(values), margin=dict(t=10, b=10))
-    return fig
-
-
 def format_params(params: dict) -> str:
-    return ", ".join(f"{key}={value}" for key, value in params.items())
+    return ", ".join(f"{PARAM_NAMES.get(key, key)} {value}" for key, value in params.items())
+
+
+def day_change(closes: pd.Series) -> float:
+    return closes.iloc[-1] / closes.iloc[-2] - 1
 
 
 def headlines_table(news: pd.DataFrame) -> None:
+    news = news.sort_values("published", ascending=False).assign(label=news["label"].str.capitalize())
     st.dataframe(
-        news.sort_values("published", ascending=False)[["published", "headline", "label", "positive", "negative", "neutral"]],
+        news[["published", "headline", "label", "positive", "negative", "neutral"]],
         hide_index=True,
+        height=420,
         column_config={
-            "published": st.column_config.DatetimeColumn("Published (UTC)", format="YYYY-MM-DD HH:mm"),
-            "headline": "Headline",
+            "published": st.column_config.DatetimeColumn("Published (UTC)", format="D MMM YYYY, HH:mm"),
+            "headline": st.column_config.TextColumn("Headline", width="large"),
             "label": "Sentiment",
-            **{c: st.column_config.ProgressColumn(c.title(), min_value=0, max_value=1, format="%.2f") for c in ["positive", "negative", "neutral"]},
+            **{
+                c: st.column_config.ProgressColumn(c.capitalize(), min_value=0, max_value=1, format="%.2f", width="small")
+                for c in ["positive", "negative", "neutral"]
+            },
         },
     )
 
@@ -99,36 +102,46 @@ def live_market(ticker: str, query: str) -> None:
     sessions = bars.index.normalize()
     today = bars[sessions == sessions[-1]]
     earlier = bars[sessions < sessions[-1]]
-    price = today["Close"].iloc[-1]
+    price, last_trade = today["Close"].iloc[-1], today.index[-1]
+    previous_close = earlier["Close"].iloc[-1] if len(earlier) else None
+    market_open = pd.Timestamp.now(tz=last_trade.tz) - last_trade < pd.Timedelta(minutes=15)
+    sentiment = (news["positive"] - news["negative"]).mean() if len(news) else None
 
-    cols = st.columns(4)
-    if earlier.empty:
-        cols[0].metric("Last price", f"{price:,.2f}")
-    else:
-        cols[0].metric("Last price", f"{price:,.2f}", f"{price / earlier['Close'].iloc[-1] - 1:+.2%} vs previous close")
-    cols[1].metric(f"Last trade · {today.index[-1]:%d %b}", f"{today.index[-1]:%H:%M %Z}")
-    cols[2].metric("Headlines (24h)", len(news))
-    cols[3].metric("Avg sentiment (24h)", f"{(news['positive'] - news['negative']).mean():+.2f}" if len(news) else "–")
-
-    fig = px.line(today, y="Close", labels={"Close": "Price", "Datetime": ""})
-    fig.update_layout(height=320, margin=dict(t=10))
-    st.plotly_chart(fig)
-    st.caption(
-        f"Refreshes every {LIVE_REFRESH_SECONDS} seconds. New headlines are scored with FinBERT and saved to "
-        "the database, so the next model run includes them."
+    st.html(
+        f'<div class="fx-status"><b>Market {"open" if market_open else "closed"}</b>'
+        f"<span>Last trade {short_day(last_trade)}, {last_trade:%H:%M %Z}</span>"
+        f"<span>Updates every {LIVE_REFRESH_SECONDS} seconds</span></div>"
     )
-    st.subheader("Headlines from the last 24 hours")
-    headlines_table(news)
+    st.html(
+        ui.figures([
+            ("Last price", f"{price:,.2f}", "" if previous_close is None else f"{pct(price / previous_close - 1)} vs previous close"),
+            ("Day range", f"{today['Low'].min():,.2f}<small>to {today['High'].max():,.2f}</small>", "this session"),
+            ("Headlines", f"{len(news)}", "last 24 hours"),
+            ("Sentiment", "None" if sentiment is None else f"{sentiment:+.2f}", "average, last 24 hours"),
+        ])
+    )
+    with ui.panel("intraday"):
+        ui.panel_header(f"Intraday price, {day(last_trade)}", "One-minute prices. The gray line marks the previous close.")
+        charts.show(charts.intraday(today, previous_close))
+    with ui.panel("live_news"):
+        ui.panel_header("Latest headlines", "Scored with FinBERT and saved, so the next model run includes them.")
+        st.html(ui.headline_list(news) if len(news) else '<div class="fx-panel-note">No headlines in the last 24 hours.</div>')
 
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.header("Analyse a stock")
-    with st.form("analyse"):
-        new_ticker = st.text_input("Ticker (Yahoo Finance symbol)", placeholder="AAPL, MSFT, RELIANCE.NS")
+    st.html(
+        '<div class="fx-brand"><div class="fx-label">B.Tech major project</div>'
+        '<div class="fx-brand-name">Stock Price Prediction</div>'
+        '<div class="fx-panel-note">News sentiment with LSTM and Transformer models</div></div>'
+    )
+    picker = st.container()
+    ui.side_label("Analyse a new stock")
+    with st.form("analyse", border=False):
+        new_ticker = st.text_input("Ticker", placeholder="AAPL, MSFT, RELIANCE.NS", help="A Yahoo Finance symbol.")
         years = st.slider("Years of history", 2, 10, HISTORY_YEARS)
-        submitted = st.form_submit_button("Run analysis", type="primary")
-    st.caption("Collects data, scores news with FinBERT, trains both models and computes SHAP. Takes a few minutes.")
+        submitted = st.form_submit_button("Run analysis", type="primary", width="stretch")
+    st.html(f'<div class="fx-side-foot">{about.DEPARTMENT}<br>{about.COLLEGE}</div>')
 
 if submitted and new_ticker.strip():
     ticker = new_ticker.strip().upper()
@@ -137,125 +150,175 @@ if submitted and new_ticker.strip():
 
 analysed = sorted(p.name for p in ARTIFACTS_DIR.glob("*") if (p / "summary.json").exists())
 if not analysed:
-    st.title("Stock Sentiment Predictor")
-    st.info("Enter a ticker in the sidebar and click **Run analysis** to get started.")
+    ui.section("Analyse your first stock", "Enter a Yahoo Finance ticker in the sidebar and click <b>Run analysis</b>. The first run takes about two minutes.")
+    about.render()
     st.stop()
 
-ticker = st.sidebar.selectbox("Analysed stocks", analysed, key="ticker")
-results = load_results(ticker, (ARTIFACTS_DIR / ticker / "summary.json").stat().st_mtime)
-summary = results["summary"]
+every = {t: load_results(t, (ARTIFACTS_DIR / t / "summary.json").stat().st_mtime) for t in analysed}
+with picker:
+    ui.side_label("Stocks")
+    ticker = st.radio(
+        "Stocks", analysed, key="ticker", label_visibility="collapsed",
+        captions=[f"{every[t]['summary']['last_close']:,.2f}   {pct(day_change(every[t]['dataset']['Close']))}" for t in analysed],
+    )
+
+results = every[ticker]
+summary, dataset = results["summary"], results["dataset"]
+comparison = pd.DataFrame(summary["comparison"]).sort_values("RMSE", ignore_index=True)
+best = comparison.iloc[0]
+news = db.load_news(ticker, summary["news_query"], since=pd.Timestamp(summary["start"]))
+last_close, forecast = summary["last_close"], summary["forecast"]
 
 # ---------------------------------------------------------------- header
-st.title(f"{ticker} price prediction")
-st.caption(f"Market data up to {summary['as_of']} · news search: “{summary['news_query']}”")
+left, right = st.columns([1, 1.6], gap="large", vertical_alignment="bottom")
+with left:
+    st.html(
+        f'<div class="fx-symbol">{escape(ticker)}</div>'
+        f'<div class="fx-price-line"><span class="fx-price">{last_close:,.2f}</span>'
+        f'<span class="fx-change">{pct(day_change(dataset["Close"]))}</span></div>'
+        f'<div class="fx-meta">Close on {day(summary["as_of"])}<br>'
+        f'{len(dataset):,} trading days of prices and news for "{escape(summary["news_query"])}"</div>'
+    )
+with right:
+    charts.show(charts.price_outlook(dataset, forecast))
 
-last_close = summary["last_close"]
-cols = st.columns(1 + len(summary["forecast"]))
-cols[0].metric(f"Close on {summary['as_of']}", f"{last_close:,.2f}")
-for col, (name, price) in zip(cols[1:], summary["forecast"].items()):
-    col.metric(f"{name} · next-day forecast", f"{price:,.2f}", f"{price / last_close - 1:+.2%}")
-
-tab_live, tab_pred, tab_news, tab_compare, tab_shap = st.tabs(
-    ["Live market", "Prediction", "News sentiment", "Model comparison", "Explanation (SHAP)"]
+st.html(
+    ui.figures([
+        *[(f"{name} forecast", f"{price:,.2f}", f"{pct(price / last_close - 1)} next session") for name, price in forecast.items()],
+        ("Most accurate model", best["model"], f"RMSE {best['RMSE']:.2f}, {best['features']}"),
+        ("Headlines analysed", f"{len(news):,}", f"on {int(dataset['sentiment'].ne(0).sum()):,} trading days"),
+    ])
 )
+st.html('<div style="height:20px"></div>')
 
-# ---------------------------------------------------------------- live market
-with tab_live:
-    live_market(ticker, summary["news_query"])
+tab_pred, tab_live, tab_news, tab_compare, tab_shap, tab_about = st.tabs(
+    ["Prediction", "Live market", "News sentiment", "Model comparison", "Explainability", "About"]
+)
 
 # ---------------------------------------------------------------- prediction
 with tab_pred:
-    st.subheader("Actual vs predicted close (test period)")
-    fig = px.line(results["predictions"], labels={"value": "Close", "date": "", "variable": ""})
-    fig.update_layout(legend=dict(orientation="h", y=1.08))
-    st.plotly_chart(fig)
-    st.caption("Each point is predicted using only data available at the previous day's close.")
+    predictions = results["predictions"]
+    start, end = day(predictions.index[0]), day(predictions.index[-1])
+    ui.section(
+        "Actual and predicted close",
+        f"Every trading day from {start} to {end}, predicted using only data available at the previous day's close. "
+        "None of these days were used for training.",
+    )
+    main = comparison[comparison["features"] == "with sentiment"].set_index("model")
+    st.html(
+        ui.figures(
+            [("Test period", f"{len(predictions)}<small>days</small>", f"{start} to {end}")]
+            + [
+                (name, f"{main.loc[name, 'RMSE']:.2f}<small>RMSE</small>", f"MAE {main.loc[name, 'MAE']:.2f}, R² {main.loc[name, 'R2']:.3f}")
+                for name in MODELS
+            ]
+        )
+    )
+    st.html('<div style="height:16px"></div>')
+    with ui.panel("prediction"):
+        ui.panel_header("Closing price over the test period", "The bold line is the actual close. Gray lines are the predictions: solid for LSTM, dotted for Transformer.")
+        charts.show(charts.prediction(predictions))
+
+# ---------------------------------------------------------------- live market
+with tab_live:
+    ui.section("Live market", "Prices and headlines update automatically while this page is open.")
+    live_market(ticker, summary["news_query"])
 
 # ---------------------------------------------------------------- news sentiment
 with tab_news:
-    dataset = results["dataset"]
-    news = db.load_news(ticker, summary["news_query"], since=pd.Timestamp(summary["start"]))
     counts = news["label"].value_counts()
-    cols = st.columns(4)
-    cols[0].metric("Headlines", f"{len(news):,}")
-    for col, label in zip(cols[1:], ["positive", "negative", "neutral"]):
-        count = counts.get(label, 0)
-        col.metric(f"{label.title()} ({count / max(len(news), 1):.0%})", f"{count:,}")
-
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.6, 0.4], vertical_spacing=0.05)
-    fig.add_trace(go.Scatter(x=dataset.index, y=dataset["Close"], name="Close", line_color="#1f77b4"), row=1, col=1)
-    fig.add_trace(
-        go.Bar(
-            x=dataset.index, y=dataset["sentiment"], name="Daily sentiment",
-            marker_color=[UP if v >= 0 else DOWN for v in dataset["sentiment"]],
-        ),
-        row=2, col=1,
+    scores = news["positive"] - news["negative"]
+    ui.section("News sentiment", f"FinBERT scored {len(news):,} headlines about {escape(ticker)} since {day(summary['start'])}.")
+    st.html(
+        ui.figures(
+            [(label.capitalize(), f"{counts.get(label, 0) / max(len(news), 1):.0%}", f"{counts.get(label, 0):,} headlines") for label in ["positive", "neutral", "negative"]]
+            + [("Average score", f"{scores.mean():+.2f}", "positive minus negative")]
+        )
     )
-    fig.update_yaxes(title_text="Close", row=1, col=1)
-    fig.update_yaxes(title_text="Sentiment", range=[-1, 1], row=2, col=1)
-    fig.update_layout(height=520, showlegend=False, margin=dict(t=10))
-    st.plotly_chart(fig)
-    st.caption("Daily sentiment = average FinBERT (positive − negative) probability across that day's headlines.")
-
-    st.subheader("All headlines")
-    headlines_table(news)
+    st.html('<div style="height:16px"></div>')
+    with ui.panel("sentiment"):
+        ui.panel_header(
+            "Closing price and daily news sentiment",
+            "Daily sentiment is the average of FinBERT's positive minus negative probability over that day's headlines. "
+            "Days without news count as 0.",
+        )
+        charts.show(charts.price_and_sentiment(dataset))
+    with ui.panel("headlines"):
+        ui.panel_header("All headlines", "Sort by any column, or search with the icon in the table's corner.")
+        headlines_table(news)
 
 # ---------------------------------------------------------------- model comparison
 with tab_compare:
-    comparison = pd.DataFrame(summary["comparison"])
-    comparison["params"] = comparison["params"].map(format_params)
-    best = comparison.loc[comparison["RMSE"].idxmin()]
-    st.subheader("LSTM vs Transformer, with and without news sentiment")
-    st.write(f"Lowest error on the test period: **{best['model']} ({best['features']})**, RMSE {best['RMSE']:.2f}.")
-    st.dataframe(
-        comparison,
-        hide_index=True,
-        column_config={
-            "model": "Model",
-            "features": "Features",
-            "params": "Tuned settings",
-            "MAE": st.column_config.NumberColumn(format="%.3f"),
-            "RMSE": st.column_config.NumberColumn(format="%.3f"),
-            "R2": st.column_config.NumberColumn("R²", format="%.4f"),
-        },
+    rmse = comparison.pivot(index="model", columns="features", values="RMSE")
+    effects = [
+        f"{'lowered' if row['with sentiment'] < row['without sentiment'] else 'raised'} the {model} error by "
+        f"{abs(row['with sentiment'] - row['without sentiment']):.2f}"
+        for model, row in rmse.iterrows()
+    ]
+    ui.section(
+        "Model comparison",
+        f"The <b>{best['model']} {best['features']}</b> has the lowest test error, with an RMSE of {best['RMSE']:.2f}. "
+        f"Adding news sentiment {' and '.join(effects)}.",
     )
-    fig = px.bar(comparison, x="model", y="RMSE", color="features", barmode="group", labels={"model": "", "features": ""})
-    st.plotly_chart(fig)
-    st.caption("MAE and RMSE are in price units (lower is better). R² closer to 1 is better.")
-
-    st.subheader("Hyperparameter tuning")
-    st.write("Every setting below was trained; the one with the lowest validation loss was kept. The test period was not used for this choice.")
-    tuning = pd.DataFrame(summary["tuning"])
-    tuning["params"] = tuning["params"].map(format_params)
-    st.dataframe(
-        tuning,
-        hide_index=True,
-        column_config={
-            "model": "Model",
-            "features": "Features",
-            "params": "Settings",
-            "val_loss": st.column_config.NumberColumn("Validation loss", format="%.4f"),
-            "selected": st.column_config.CheckboxColumn("Selected"),
-        },
-    )
-
-# ---------------------------------------------------------------- SHAP
-with tab_shap:
-    model_name = st.radio("Model", list(MODELS), horizontal=True)
-    shap_values = results["shap"][model_name]
-    unit = "impact on predicted next-day return (percentage points)"
-
+    with ui.panel("ranking"):
+        ui.panel_header("Test results", "MAE and RMSE are in price units, lower is better. R² closer to 1 is better.")
+        st.html(
+            ui.table(
+                [("Rank", ""), ("Model", ""), ("Features", ""), ("Tuned settings", "muted"), ("MAE", "num"), ("RMSE", "num"), ("R²", "num")],
+                [
+                    (
+                        [str(rank), row.model, row.features, format_params(row.params), f"{row.MAE:.3f}", f"{row.RMSE:.3f}", f"{row.R2:.4f}"],
+                        "best" if rank == 1 else "",
+                    )
+                    for rank, row in enumerate(comparison.itertuples(), 1)
+                ],
+            )
+        )
     left, right = st.columns(2)
-    with left:
-        st.subheader("Overall feature importance")
-        importance = shap_values.drop(index="forecast").abs().mean().sort_values()
-        fig = px.bar(x=importance.values, y=importance.index, orientation="h", labels={"x": "mean |SHAP|", "y": ""})
-        fig.update_layout(height=60 + 32 * len(importance), margin=dict(t=10, b=10))
-        st.plotly_chart(fig)
-        st.caption("Average size of each feature's effect across the test period.")
-    with right:
-        st.subheader("Why this prediction?")
-        dates = shap_values.index[::-1].tolist()
-        day = st.selectbox("Prediction", dates, format_func=lambda d: "Next-day forecast" if d == "forecast" else d)
-        st.plotly_chart(signed_bar(shap_values.loc[day], unit))
-        st.caption("Green features pushed the prediction up, red pushed it down.")
+    for col, metric, title in [(left, "MAE", "Mean absolute error"), (right, "RMSE", "Root mean squared error")]:
+        with col, ui.panel(f"error_{metric}"):
+            ui.panel_header(title, "Bold bars use news sentiment, gray bars do not.")
+            charts.show(charts.error_bars(comparison, metric))
+
+    tuning = pd.DataFrame(summary["tuning"]).sort_values(["model", "features", "val_loss"], ignore_index=True)
+    with ui.panel("tuning"):
+        ui.panel_header(
+            "Hyperparameter tuning",
+            f"{len(tuning)} settings were trained. For each model and feature set, the one with the lowest validation "
+            "loss was kept. The test period was not used for this choice.",
+        )
+        with st.expander(f"All {len(tuning)} tuning runs"):
+            st.html(
+                ui.table(
+                    [("Model", ""), ("Features", ""), ("Settings", "muted"), ("Validation loss", "num"), ("", "num")],
+                    [
+                        ([row.model, row.features, format_params(row.params), f"{row.val_loss:.4f}", "Selected" if row.selected else ""], "best" if row.selected else "")
+                        for row in tuning.itertuples()
+                    ],
+                )
+            )
+
+# ---------------------------------------------------------------- explainability
+with tab_shap:
+    ui.section(
+        "Explainability",
+        "SHAP splits each prediction into the contribution of every input feature, in percentage points of "
+        "predicted next-day return, summed over the 30-day input window.",
+    )
+    model_name = st.segmented_control("Model", list(MODELS), default=list(MODELS)[0], required=True, label_visibility="collapsed")
+    shap_values = results["shap"][model_name]
+    left, right = st.columns(2)
+    with left, ui.panel("importance"):
+        ui.panel_header("Overall feature importance", "Average size of each feature's effect across the test period.")
+        charts.show(charts.importance(shap_values))
+    with right, ui.panel("contributions"):
+        ui.panel_header("Why this prediction?", "Bold bars pushed the predicted return up, gray bars pulled it down.")
+        chosen = st.selectbox(
+            "Prediction", shap_values.index[::-1].tolist(), label_visibility="collapsed",
+            format_func=lambda d: "Next-session forecast" if d == "forecast" else day(d),
+        )
+        charts.show(charts.contributions(shap_values.loc[chosen]))
+
+# ---------------------------------------------------------------- about
+with tab_about:
+    about.render()
