@@ -2,11 +2,14 @@
 
 from pathlib import Path
 
-ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
+ROOT = Path(__file__).resolve().parent.parent
+ARTIFACTS_DIR = ROOT / "artifacts"      # model results per ticker
+DB_PATH = ROOT / "data" / "market.db"   # collected prices and scored headlines
 
 # Data collection
 HISTORY_YEARS = 5
 NEWS_WINDOW_DAYS = 7  # Google News is queried one week at a time to reach older headlines
+LIVE_REFRESH_SECONDS = 60
 
 # Sentiment
 FINBERT_MODEL = "ProsusAI/finbert"
@@ -41,6 +44,13 @@ EPOCHS = 100
 PATIENCE = 10         # early-stopping patience (epochs)
 LEARNING_RATE = 1e-3
 SEED = 42
+
+# Tuning: every combination is trained and the one with the lowest validation
+# loss is kept. The test period is never used for this choice.
+SEARCH_SPACE = {
+    "LSTM": {"hidden": [32, 64], "layers": [1, 2]},
+    "Transformer": {"d_model": [32, 64], "layers": [1, 2]},
+}
 
 # Explainability
 SHAP_BACKGROUND = 100  # training windows used as the SHAP baseline

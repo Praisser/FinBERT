@@ -1,4 +1,6 @@
 .venv/
 __pycache__/
 artifacts/
+data/
+.ipynb_checkpoints/
 .DS_Store

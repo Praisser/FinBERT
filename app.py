@@ -1,5 +1,5 @@
-"""Dashboard: run the pipeline for a stock and explore its predictions, news sentiment,
-model comparison and SHAP explanations.
+"""Dashboard: run the pipeline for a stock and explore live market data, its predictions,
+news sentiment, model comparison and SHAP explanations.
 
     streamlit run app.py
 """
@@ -13,7 +13,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from stockpred.config import ARTIFACTS_DIR, HISTORY_YEARS
+from stockpred import db, ingest
+from stockpred.config import ARTIFACTS_DIR, HISTORY_YEARS, LIVE_REFRESH_SECONDS
 from stockpred.models import MODELS
 from stockpred.pipeline import run
 
@@ -58,7 +59,6 @@ def load_results(ticker: str, version: float) -> dict:
         "summary": json.loads((folder / "summary.json").read_text()),
         "predictions": pd.read_csv(folder / "predictions.csv", index_col="date", parse_dates=True),
         "dataset": pd.read_csv(folder / "dataset.csv", index_col="date", parse_dates=True),
-        "news": pd.read_csv(folder / "news.csv", parse_dates=["published"]),
         "shap": {name: pd.read_csv(folder / f"shap_{name}.csv", index_col="date") for name in MODELS},
     }
 
@@ -68,6 +68,57 @@ def signed_bar(values: pd.Series, x_title: str) -> go.Figure:
     fig = go.Figure(go.Bar(x=values, y=values.index, orientation="h", marker_color=[UP if v >= 0 else DOWN for v in values]))
     fig.update_layout(xaxis_title=x_title, height=60 + 32 * len(values), margin=dict(t=10, b=10))
     return fig
+
+
+def format_params(params: dict) -> str:
+    return ", ".join(f"{key}={value}" for key, value in params.items())
+
+
+def headlines_table(news: pd.DataFrame) -> None:
+    st.dataframe(
+        news.sort_values("published", ascending=False)[["published", "headline", "label", "positive", "negative", "neutral"]],
+        hide_index=True,
+        column_config={
+            "published": st.column_config.DatetimeColumn("Published (UTC)", format="YYYY-MM-DD HH:mm"),
+            "headline": "Headline",
+            "label": "Sentiment",
+            **{c: st.column_config.ProgressColumn(c.title(), min_value=0, max_value=1, format="%.2f") for c in ["positive", "negative", "neutral"]},
+        },
+    )
+
+
+@st.fragment(run_every=LIVE_REFRESH_SECONDS)
+def live_market(ticker: str, query: str) -> None:
+    """Re-runs on its own every LIVE_REFRESH_SECONDS while the page is open."""
+    try:
+        bars, news = ingest.refresh_live(ticker, query)
+    except Exception as exc:
+        st.warning(f"Live data is unavailable right now: {exc}")
+        return
+
+    sessions = bars.index.normalize()
+    today = bars[sessions == sessions[-1]]
+    earlier = bars[sessions < sessions[-1]]
+    price = today["Close"].iloc[-1]
+
+    cols = st.columns(4)
+    if earlier.empty:
+        cols[0].metric("Last price", f"{price:,.2f}")
+    else:
+        cols[0].metric("Last price", f"{price:,.2f}", f"{price / earlier['Close'].iloc[-1] - 1:+.2%} vs previous close")
+    cols[1].metric(f"Last trade · {today.index[-1]:%d %b}", f"{today.index[-1]:%H:%M %Z}")
+    cols[2].metric("Headlines (24h)", len(news))
+    cols[3].metric("Avg sentiment (24h)", f"{(news['positive'] - news['negative']).mean():+.2f}" if len(news) else "–")
+
+    fig = px.line(today, y="Close", labels={"Close": "Price", "Datetime": ""})
+    fig.update_layout(height=320, margin=dict(t=10))
+    st.plotly_chart(fig)
+    st.caption(
+        f"Refreshes every {LIVE_REFRESH_SECONDS} seconds. New headlines are scored with FinBERT and saved to "
+        "the database, so the next model run includes them."
+    )
+    st.subheader("Headlines from the last 24 hours")
+    headlines_table(news)
 
 
 # ---------------------------------------------------------------- sidebar
@@ -104,7 +155,13 @@ cols[0].metric(f"Close on {summary['as_of']}", f"{last_close:,.2f}")
 for col, (name, price) in zip(cols[1:], summary["forecast"].items()):
     col.metric(f"{name} · next-day forecast", f"{price:,.2f}", f"{price / last_close - 1:+.2%}")
 
-tab_pred, tab_news, tab_compare, tab_shap = st.tabs(["Prediction", "News sentiment", "Model comparison", "Explanation (SHAP)"])
+tab_live, tab_pred, tab_news, tab_compare, tab_shap = st.tabs(
+    ["Live market", "Prediction", "News sentiment", "Model comparison", "Explanation (SHAP)"]
+)
+
+# ---------------------------------------------------------------- live market
+with tab_live:
+    live_market(ticker, summary["news_query"])
 
 # ---------------------------------------------------------------- prediction
 with tab_pred:
@@ -116,7 +173,8 @@ with tab_pred:
 
 # ---------------------------------------------------------------- news sentiment
 with tab_news:
-    news, dataset = results["news"], results["dataset"]
+    dataset = results["dataset"]
+    news = db.load_news(ticker, summary["news_query"], since=pd.Timestamp(summary["start"]))
     counts = news["label"].value_counts()
     cols = st.columns(4)
     cols[0].metric("Headlines", f"{len(news):,}")
@@ -139,22 +197,13 @@ with tab_news:
     st.plotly_chart(fig)
     st.caption("Daily sentiment = average FinBERT (positive − negative) probability across that day's headlines.")
 
-    st.subheader("Latest headlines")
-    latest = news.sort_values("published", ascending=False).head(200)
-    st.dataframe(
-        latest[["published", "headline", "label", "positive", "negative", "neutral"]],
-        hide_index=True,
-        column_config={
-            "published": st.column_config.DatetimeColumn("Published", format="YYYY-MM-DD HH:mm"),
-            "headline": "Headline",
-            "label": "Sentiment",
-            **{c: st.column_config.ProgressColumn(c.title(), min_value=0, max_value=1, format="%.2f") for c in ["positive", "negative", "neutral"]},
-        },
-    )
+    st.subheader("All headlines")
+    headlines_table(news)
 
 # ---------------------------------------------------------------- model comparison
 with tab_compare:
     comparison = pd.DataFrame(summary["comparison"])
+    comparison["params"] = comparison["params"].map(format_params)
     best = comparison.loc[comparison["RMSE"].idxmin()]
     st.subheader("LSTM vs Transformer, with and without news sentiment")
     st.write(f"Lowest error on the test period: **{best['model']} ({best['features']})**, RMSE {best['RMSE']:.2f}.")
@@ -164,6 +213,7 @@ with tab_compare:
         column_config={
             "model": "Model",
             "features": "Features",
+            "params": "Tuned settings",
             "MAE": st.column_config.NumberColumn(format="%.3f"),
             "RMSE": st.column_config.NumberColumn(format="%.3f"),
             "R2": st.column_config.NumberColumn("R²", format="%.4f"),
@@ -172,6 +222,22 @@ with tab_compare:
     fig = px.bar(comparison, x="model", y="RMSE", color="features", barmode="group", labels={"model": "", "features": ""})
     st.plotly_chart(fig)
     st.caption("MAE and RMSE are in price units (lower is better). R² closer to 1 is better.")
+
+    st.subheader("Hyperparameter tuning")
+    st.write("Every setting below was trained; the one with the lowest validation loss was kept. The test period was not used for this choice.")
+    tuning = pd.DataFrame(summary["tuning"])
+    tuning["params"] = tuning["params"].map(format_params)
+    st.dataframe(
+        tuning,
+        hide_index=True,
+        column_config={
+            "model": "Model",
+            "features": "Features",
+            "params": "Settings",
+            "val_loss": st.column_config.NumberColumn("Validation loss", format="%.4f"),
+            "selected": st.column_config.CheckboxColumn("Selected"),
+        },
+    )
 
 # ---------------------------------------------------------------- SHAP
 with tab_shap:
